@@ -8,7 +8,7 @@ metadata:
 spec:
   project: default
   source:
-    repoURL: https://gitlab.com/your-username/your-repo.git
+    repoURL: https://gitlab.com/eadors/mlops-fp.git
     targetRevision: main
     path: helm
     helm:

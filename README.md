@@ -1,14 +1,14 @@
-# Повний процес CI/CD: від пушу до редеплою в EKS
+# CI/CD full process: from push to redeploy in EKS
 
-## Архітектура
+## Algorithm
 
 ```
 GitLab Repo → GitLab CI/CD → AWS ECR → ArgoCD → EKS Cluster
 ```
 
-## Детальний процес
+## Step-by-stem process
 
-### 1. Розробник пушить зміни в GitLab
+### 1. Developer pushes changes in GitLab
 
 ```bash
 git add .
@@ -16,141 +16,141 @@ git commit -m "Update model or code"
 git push origin main
 ```
 
-**Що може змінитись:**
-- Код додатку (`predict.py`, `requirements.txt`)
+**Possible changes:**
+- Application code (`predict.py`, `requirements.txt`)
 - Dockerfile
-- Helm чарт (`helm/` директорія)
-- ArgoCD конфігурація (`argocd/application.yaml`)
+- Helm chart (`helm/` folder)
+- ArgoCD configuration (`argocd/application.yaml`)
 
-### 2. GitLab CI/CD виявляє зміни
+### 2. GitLab CI/CD finds changes
 
-- GitLab автоматично виявляє push в гілки: `main`, `master`, або `develop`
-- Запускається pipeline згідно з `.gitlab-ci.yml`
+- GitLab find automaticaly push in branch: `main`, `master`, or `develop`
+- Pipeline runs according with `.gitlab-ci.yml`
 
-### 3. Build Stage - Збірка Docker образу
+### 3. Build Stage - Docker image assemly
 
 **Job: `build`**
 
-**Кроки виконання:**
+**Deployment steps:**
 
-1. **Ініціалізація середовища:**
-   - Запускається Docker-in-Docker (dind) сервіс
-   - Встановлюється AWS CLI
+1. **Environment inicialization:**
+   - Docker-in-Docker (dind) service is startig
+   - AWS CLI is installing
 
-2. **Авторизація в AWS ECR:**
+2. **Authorization in в AWS ECR:**
    ```bash
    aws ecr get-login-password --region eu-central-1 | \
      docker login --username AWS --password-stdin $ECR_REGISTRY
    ```
-   - Отримується токен авторизації для ECR
-   - Виконується Docker login
+   - Authorisation tokens for ECR receiving 
+   - Docker login starts
 
-3. **Збірка Docker образу:**
+3. **Docker image assemling:**
    ```bash
    docker build -t $IMAGE_TAG .
    ```
-   - Створюється образ з тегом: `fast-api-service:24ffgh24` (commit SHA)
-   - Виконується Dockerfile:
-     - Базовий образ: `python:3.11-slim`
-     - Копіюються `requirements.txt` та `predict.py`
-     - Встановлюються залежності (FastAPI, uvicorn)
+   - Image created with following teg: `fast-api-service:24ffgh24` (commit SHA)
+   - Dockerfile running:
+     - Basic image: `python:3.11-slim`
+     - `requirements.txt` and `predict.py`copying
+     - Dependencies created (FastAPI, uvicorn)
 
-4. **Тегування та публікація в ECR:**
+4. **Tagging and publicing in ECR:**
    ```bash
    docker tag $IMAGE_TAG $ECR_REGISTRY/$IMAGE_TAG
    docker push $ECR_REGISTRY/$IMAGE_TAG
    docker tag $IMAGE_TAG $ECR_REGISTRY/$CI_REGISTRY_IMAGE:latest
    docker push $ECR_REGISTRY/$CI_REGISTRY_IMAGE:latest
    ```
-   - Образ пушиться з двома тегами:
+   - The image pushes with two tags:
      - `451405121207.dkr.ecr.eu-central-1.amazonaws.com/fast-api-service:24ffgh24` (commit SHA)
      - `451405121207.dkr.ecr.eu-central-1.amazonaws.com/fast-api-service:latest` (latest)
 
-**Результат:** Docker образ доступний в AWS ECR
+**The result:** Docker image is accessible in AWS ECR
 
-### 4. ArgoCD відстежує зміни в Git репозиторії
+### 4. ArgoCD tracking changes in Git repository 
 
-**Як працює ArgoCD:**
+**How does ArgoCD work:**
 
-1. **ArgoCD Application налаштований:**
-   - Відстежує репозиторій: `https://gitlab.com/your-username/your-repo.git`
-   - Гілка: `main`
-   - Шлях: `helm/` (Helm чарт)
-   - Auto-sync увімкнено з інтервалом перевірки (зазвичай 3 хвилини)
+1. **ArgoCD Application tuned:**
+   - It tracks repository: `https://gitlab.com/eadors/mlops-fp.git`
+   - Branch: `main`
+   - Path: `helm/` (Helm chart)
+   - Auto-sync switched on with checking interval (default 3 minutes)
 
-2. **ArgoCD виявляє зміни:**
-   - ArgoCD періодично перевіряє Git репозиторій
-   - Якщо зміни в `helm/` директорії або в `argocd/application.yaml`:
-     - ArgoCD виявляє новий commit
-     - Порівнює поточний стан кластера з бажаним станом з Git
+2. **ArgoCD discovers changes:**
+   - ArgoCD tracks Git repository
+   - If there is changes in `helm/`folder or in `argocd/application.yaml`:
+     - ArgoCD finds new commit
+     - It compares current cluster stage with necessary Git stage
 
-3. **Auto-sync політика:**
-   - `prune: true` - видаляє ресурси, яких більше немає в Git
-   - `selfHeal: true` - автоматично відновлює стан, якщо хтось змінив його вручну
-   - `allowEmpty: false` - не дозволяє порожній sync
+3. **Auto-sync policy:**
+   - `prune: true` - removes resources which are absence in Git
+   - `selfHeal: true` - if someone change the stage it restore correct stage automaticaly
+   - `allowEmpty: false` - doesn't allow empty sync
 
-### 5. ArgoCD синхронізує зміни з EKS кластером
+### 5. ArgoCD synchronises  changes with EKS cluster
 
-**Процес синхронізації:**
+**Synchronisation process:**
 
-1. **ArgoCD читає Helm чарт:**
-   - Завантажує `helm/Chart.yaml`
-   - Завантажує `helm/values.yaml`
-   - Застосовує параметри з `argocd/application.yaml`:
+1. **ArgoCD reads Helm chart:**
+   - Download `helm/Chart.yaml`
+   - Download `helm/values.yaml`
+   - Applies parameters from `argocd/application.yaml`:
      ```yaml
      image.repository: 451405121207.dkr.ecr.eu-central-1.amazonaws.com/fast-api-service
      image.tag: latest
      ```
 
-2. **Генерація Kubernetes manifests:**
-   - ArgoCD виконує `helm template` з параметрами
-   - Генерує Kubernetes ресурси:
+2. **Kubernetes manifests generation:**
+   - ArgoCD runs `helm template` with parameters
+   - Generate Kubernetes resources:
      - Deployment
      - Service
      - ServiceAccount
-     - Ingress (якщо увімкнено)
-     - HPA (якщо увімкнено)
+     - Ingress (if enabled)
+     - HPA (if enabled)
 
-3. **Застосування змін до кластера:**
-   - ArgoCD використовує Kubernetes API для застосування змін
-   - Виконується `kubectl apply` для нових/оновлених ресурсів
+3. **Changes apply to cluster:**
+   - ArgoCD use Kubernetes API for changes apply
+   - `kubectl apply` runs for new/updated resources
 
-### 6. Kubernetes оновлює Deployment
+### 6. Kubernetes updates Deployment
 
-**Процес оновлення в EKS:**
+**Updates process in EKS:**
 
-1. **Deployment Controller виявляє зміни:**
-   - Kubernetes виявляє нову версію Deployment
-   - Порівнює поточний стан з бажаним
+1. **Deployment Controller finds changes:**
+   - Kubernetes finds Deployment new version
+   - Compare current stage with necessary
 
 2. **Rolling Update:**
-   - Kubernetes створює нові Pod'и з новим образом
-   - Новий образ: `451405121207.dkr.ecr.eu-central-1.amazonaws.com/fast-api-service:latest`
-   - Старі Pod'и продовжують працювати до готовності нових
+   - Kubernetes creates new Pods with new image
+   - New image: `451405121207.dkr.ecr.eu-central-1.amazonaws.com/fast-api-service:latest`
+   - Old Pods continue work until new ones are ready
 
 3. **Readiness Probe:**
-   - Kubernetes перевіряє `/docs` endpoint
-   - Коли нові Pod'и готові (readiness probe успішна):
-     - Трафік переключається на нові Pod'и
-     - Старі Pod'и завершуються
+   - Kubernetes checks `/docs` endpoint
+   - When new Pods are ready (readiness probe successfully):
+     - Trafic switches to the new Pods
+     - Old Pods finish
 
-4. **Результат:**
-   - Сервіс оновлено до нової версії
-   - Мінімальний downtime (rolling update)
-   - 2 репліки працюють з новим кодом
+4. **The result:**
+   - Service updated to the new version
+   - Minimal downtime (rolling update)
+   - 2 replics work with the new code
 
-### 7. Перевірка статусу
+### 7. Status check
 
-**Моніторинг процесу:**
+**Process monitoring:**
 
 1. **GitLab CI/CD:**
-   - Перевірити статус build job в GitLab UI
-   - Переконатись, що образ успішно запушено в ECR
+   - Build job status check in GitLab UI
+   - Check that the image successfully pushed in ECR
 
 2. **ArgoCD UI:**
-   - Відкрити ArgoCD dashboard
-   - Перевірити статус Application `mlops-inference-service`
-   - Побачити синхронізацію в реальному часі
+   - Open ArgoCD dashboard
+   - Check status of application `mlops-inference-service`
+   - See synchronization in real time
 
 3. **Kubernetes:**
    ```bash
@@ -159,65 +159,64 @@ git push origin main
    kubectl describe deployment mlops-inference-service -n default
    ```
 
-4. **Тестування сервісу:**
+4. **Service testing:**
    ```bash
    kubectl port-forward svc/mlops-inference-service 8000:8000 -n default
    curl http://localhost:8000/docs
    curl -X POST http://localhost:8000/predict -H "Content-Type: application/json" -d '{"input": "test"}'
    ```
 
-## Сценарії оновлення
+## Update scenarios
 
-### Сценарій 1: Оновлення коду додатку
+### Scenario 1: App code update
 
-1. Змінюється `predict.py` або `requirements.txt`
-2. Push в GitLab → Build job збирає новий образ
-3. Образ пушиться в ECR з тегом `latest`
-4. ArgoCD не виявляє змін в `helm/`, але образ `latest` оновлено
-5. **Потрібно оновити Helm чарт** або змінити `image.tag` в ArgoCD application
+1. `predict.py` or `requirements.txt` changes
+2. Push in GitLab → Build job assemble a new image
+3. The image has been pushed in ECR with tag `latest`
+4. ArgoCD didn't find changes in `helm/`, but image `latest` updated
+5. **It is necessary to update Helm chart** or change `image.tag` in ArgoCD application
 
-**Рішення:** Оновити `argocd/application.yaml` з новим тегом або використати commit SHA
+**Solution:** Update `argocd/application.yaml` with new tag or use commit SHA
 
-### Сценарій 2: Оновлення Helm чарта
+### Scenario 2: Helm chart update
 
-1. Змінюється конфігурація в `helm/values.yaml` (наприклад, `replicaCount: 3`)
+1. Changes in `helm/values.yaml` configuration (for example, `replicaCount: 3`)
 2. Push в GitLab
-3. ArgoCD виявляє зміни в `helm/` директорії
-4. ArgoCD автоматично синхронізує зміни
-5. Kubernetes масштабує deployment до 3 реплік
+3. ArgoCD finds changes in `helm/` folder
+4. ArgoCD automatically synchronize the changes
+5. Kubernetes extends deployment up to 3 replics
 
-### Сценарій 3: Оновлення Dockerfile
+### Scenario 3: Dockerfile update
 
-1. Змінюється `Dockerfile`
-2. Push в GitLab → Build job збирає новий образ
-3. Образ пушиться в ECR
-4. ArgoCD використовує образ `latest`, тому автоматично підхопить новий образ
-5. Kubernetes виконує rolling update
+1. `Dockerfile` is changed
+2. Push в GitLab → Build job assemble a new image
+3. The image is pushed in ECR
+4. ArgoCD use image `latest` and automatically use this image
+5. Kubernetes uses rolling update
 
-## Важливі моменти
+## Important
 
-### Безпека образів
+### Images' security
 
-- Образ з тегом `latest` завжди вказує на останню збірку
-- Образ з commit SHA дозволяє відкотитись до конкретної версії
-- Рекомендується використовувати конкретні теги для production
+- The image with tag `latest` always indicates to the last assembly
+- The image with commit SHA allows rollback to the necessary version
+- Recommended to use specific tags for production
 
-### Автоматизація
+### Automation 
 
-- ArgoCD auto-sync забезпечує автоматичне оновлення
-- Self-heal відновлює стан при ручних змінах
-- Prune видаляє застарілі ресурси
+- ArgoCD auto-sync provides automatically update
+- Self-heal restore stage in case of manual changes
+- Prune deletes out of date resources
 
-### Моніторинг
+### Monitoring
 
-- ArgoCD UI показує статус синхронізації
-- Kubernetes events показують процес оновлення
-- GitLab CI/CD показує статус збірки
+- ArgoCD UI shows stage of synchronization
+- Kubernetes events shows update process
+- GitLab CI/CD shows th image stage
 
-## Час виконання
+## Deployment time
 
-- **Build job:** 2-5 хвилин (залежить від розміру образу)
-- **ArgoCD sync:** 3-5 хвилин (інтервал перевірки + час синхронізації)
-- **Kubernetes rolling update:** 1-3 хвилини (залежить від кількості реплік)
-- **Загальний час:** 6-13 хвилин від push до повного редеплою
-
+- **Build job:** 2-5 minutes (depends on the image size)
+- **ArgoCD sync:** 3-5 minutes (check interval + synchronization time)
+- **Kubernetes rolling update:** 1-3 minutes (depends on number of replics)
+- **Total time:** 6-13 minutes from push to total redeploy
