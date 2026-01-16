@@ -1,0 +1,35 @@
+mlflow:
+  service:
+    type: ClusterIP
+    port: 5000
+
+  backendStore:
+    databaseMigration: true
+    databaseConnectionCheck: true
+    postgres:
+      enabled: true
+      host: postgres.training.svc.cluster.local
+      port: 5432
+      database: mlflow
+      user: mlflow
+      password: changeme  # як у твоєму postgres chart values/secret
+
+  # ВАРІАНТ B (швидкий): artifacts у pod (пропадуть після рестарту)
+  extraVolumes:
+    - name: mlflow-data
+      emptyDir: {}
+
+  extraVolumeMounts:
+    - name: mlflow-data
+      mountPath: /mlflow/data
+
+  artifactRoot:
+    proxiedArtifactStorage: true
+    defaultArtifactsDestination: /mlflow/data/mlartifacts
+
+  extraFlags:
+    - serveArtifacts
+
+  ingress:
+    enabled: false
+

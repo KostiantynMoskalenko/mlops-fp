@@ -1,100 +1,97 @@
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-from typing import Optional, Dict, Any
+import os
+import time
 import logging
-import asyncio
+from typing import List, Any
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+from fastapi import FastAPI
+from pydantic import BaseModel, Field
+from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
+from starlette.responses import Response
 
-app = FastAPI(title="MLOps Inference Service", version="1.0.0")
+# ---------- logging ----------
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s %(levelname)s %(message)s")
+logger = logging.getLogger("inference-api")
+
+# ---------- prometheus metrics ----------
+REQUESTS_TOTAL = Counter(
+    "inference_requests_total",
+    "Total number of prediction requests",
+    ["endpoint", "status"]
+)
+
+REQUEST_LATENCY_SECONDS = Histogram(
+    "inference_request_latency_seconds",
+    "Latency of prediction requests in seconds",
+    ["endpoint"]
+)
+
+DRIFT_DETECTED_TOTAL = Counter(
+    "drift_detected_total",
+    "Total number of drift detections",
+)
+
+# ---------- app ----------
+app = FastAPI(title="Inference API", version="0.1.0")
 
 class PredictRequest(BaseModel):
-    input: Any
+    instances: List[List[float]] = Field(..., description="List of feature vectors")
 
 class PredictResponse(BaseModel):
-    prediction: float
-    drift_detected: Optional[bool] = None
+    predictions: List[Any]
+    drift_detected: bool = False
 
-class ModelLoader:
-    def __init__(self):
-        self.model = None
-        self.drift_detector = None
-        self._load_model()
-        self._load_drift_detector()
-    
-    def _load_model(self):
-        logger.info("Loading model...")
-        self.model = MockModel()
-        logger.info("Model loaded successfully")
-    
-    def _load_drift_detector(self):
-        logger.info("Loading drift detector...")
-        self.drift_detector = MockDriftDetector()
-        logger.info("Drift detector loaded successfully")
-    
-    def get_model(self):
-        return self.model
-    
-    def get_drift_detector(self):
-        return self.drift_detector
+def dummy_predict(instances: List[List[float]]) -> List[int]:
+    """
+    Temporary predictor.
+    Later we will replace it with MLflow-loaded model.predict(...)
+    """
+    # simple deterministic output to test the pipeline
+    return [int(sum(x) > 10) for x in instances]
 
-class MockModel:
-    def predict(self, data: Any) -> float:
-        import random
-        return random.random()
-
-class MockDriftDetector:
-    async def detect(self, data: Any) -> bool:
-        await asyncio.sleep(0.01)
-        import random
-        return random.random() < 0.1
-
-model_loader = ModelLoader()
-
-def predict(data: Any) -> float:
-    model = model_loader.get_model()
-    prediction = model.predict(data)
-    return prediction
-
-async def detect_drift(data: Any) -> Optional[bool]:
-    drift_detector = model_loader.get_drift_detector()
-    if drift_detector is None:
-        return None
-    try:
-        drift_detected = await drift_detector.detect(data)
-        if drift_detected:
-            logger.warning("Drift detected in input data")
-            print("Drift detected")
-        return drift_detected
-    except Exception as e:
-        logger.error(f"Error in drift detection: {e}")
-        return None
-
-@app.on_event("startup")
-async def startup_event():
-    logger.info("Starting up inference service...")
-    logger.info("Model and drift detector are ready")
+def drift_detector_stub(instances: List[List[float]]) -> bool:
+    """
+    Drift detector stub.
+    Later: Alibi Detect or Great Expectations.
+    For now: return True if any feature value is too large (toy rule).
+    """
+    for row in instances:
+        if any(v > 100 for v in row):
+            return True
+    return False
 
 @app.get("/health")
-async def health_check():
-    return {"status": "healthy", "model_loaded": model_loader.model is not None}
+def health():
+    return {"status": "ok"}
+
+@app.get("/metrics")
+def metrics():
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 @app.post("/predict", response_model=PredictResponse)
-async def predict_endpoint(request: PredictRequest):
+def predict(payload: PredictRequest):
+    endpoint = "/predict"
+    start = time.time()
+
     try:
-        prediction = predict(request.input)
-        drift_detected = await detect_drift(request.input)
-        
-        return PredictResponse(
-            prediction=prediction,
-            drift_detected=drift_detected
-        )
+        logger.info("request.instances=%s", payload.instances)
+
+        drift = drift_detector_stub(payload.instances)
+        if drift:
+            DRIFT_DETECTED_TOTAL.inc()
+            logger.warning("Drift detected")
+
+        preds = dummy_predict(payload.instances)
+
+        logger.info("response.predictions=%s drift_detected=%s", preds, drift)
+
+        REQUESTS_TOTAL.labels(endpoint=endpoint, status="success").inc()
+        return PredictResponse(predictions=preds, drift_detected=drift)
+
     except Exception as e:
-        logger.error(f"Prediction error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception("predict_failed: %s", e)
+        REQUESTS_TOTAL.labels(endpoint=endpoint, status="error").inc()
+        raise
 
-@app.get("/")
-async def root():
-    return {"message": "MLOps Inference Service", "docs": "/docs"}
-
+    finally:
+        REQUEST_LATENCY_SECONDS.labels(endpoint=endpoint).observe(time.time() - start)

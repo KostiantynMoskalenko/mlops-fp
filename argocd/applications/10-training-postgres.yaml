@@ -1,0 +1,21 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: training-postgres
+  namespace: infra-tools
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/Ember1995/goitneo-mlops-fp.git
+    targetRevision: final-project
+    path: helm/postgres
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: training
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true

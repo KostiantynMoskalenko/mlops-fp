@@ -1,222 +1,249 @@
-# CI/CD full process: from push to redeploy in EKS
+# MLOps Project: End-to-End MLOps Pipeline
 
-## Algorithm
+✅ **Реалізовано в поточній версії**:
+- FastAPI inference-сервіс із ендпоінтами `/health`, `/predict`, `/metrics`.
+- Логування вхідних даних та результатів.
+- Drift detection у вигляді простого rule-based stub (для демонстрації механіки).
+- Prometheus-метрики (requests, latency, drift counter) та scrape через pod annotations.
+- GitOps деплой через ArgoCD (App-of-Apps), розділення на namespaces: `serving`, `training`, `observability`.
+- MLflow + Postgres підняті як training-plane для трекінгу експериментів (доступ через port-forward).
 
+⚠️ **Архітектурні рішення та обмеження**
+
+Через використання **AWS Free Tier** та ліміти вузлів **t3.small**:
+1. **Ресурсний менеджмент**: Компоненти Loki та Promtail були видалені після тестів, оскільки вони призводили до помилки Too many pods (перевищення ліміту IP-адрес/подів на один вузол).
+2. **Мережевий доступ**: Доступ до сервісів здійснюється через kubectl port-forward. Використання AWS Load Balancer вимкнено для запобігання зайвих витрат.
+3. **CI/CD Retrain**: GitLab CI працює в **Demo/Mock режимі**. Оскільки MLflow знаходиться всередині приватної мережі EKS, пайплайн імітує успішне тренування та фокусується на кроках збірки образу та оновлення версії в Git (GitOps-пуш). Оскільки AWS Load Balancer вимкнено, не можемо зробити MLflow публічним.
+
+---
+
+## Структура репозиторію (фактична)
 ```
-GitLab Repo → GitLab CI/CD → AWS ECR → ArgoCD → EKS Cluster
+aiops-quality-project/
+├── app/
+│   ├── main.py                    # FastAPI inference + metrics + drift stub
+│   ├── requirements.txt
+│   └── argocd/
+│       ├── app-of-apps.yaml       # App-of-Apps entrypoint
+│       └── applications/          # ArgoCD child apps (serving/training/observability)
+├── model/
+│   ├── train.py                   # Training + MLflow model registry (локально через port-forward)
+│   └── requirements.txt
+├── helm/
+│   ├── inference-api/             # Helm chart: inference service
+│   ├── mlflow/                    # Wrapper chart: mlflow community chart
+│   └── postgres/                  # Helm chart: postgres for mlflow backend store
+├── terraform/
+│   ├── ecr/
+│   └── eks/
+├── Dockerfile
+├── .gitlab-ci.yml
+└── README.md
 ```
 
-## Step-by-stem process
 
-### 1. Developer pushes changes in GitLab
+## Етап 1: Інфраструктура як код (Terraform ECR)
+
+**Дія:** Створення реєстру AWS ECR для зберігання Docker-образів сервісу інференсу.
 
 ```bash
-git add .
-git commit -m "Update model or code"
-git push origin main
+cd terraform/ecr
+terraform init
+terraform apply -auto-approve
 ```
 
-**Possible changes:**
-- Application code (`predict.py`, `requirements.txt`)
-- Dockerfile
-- Helm chart (`helm/` folder)
-- ArgoCD configuration (`argocd/application.yaml`)
+![alt text](screens/0.%20terra_apply.png)
 
-### 2. GitLab CI/CD finds changes
+---
 
-- GitLab find automaticaly push in branch: `main`, `master`, or `develop`
-- Pipeline runs according with `.gitlab-ci.yml`
+## Етап 2: Розробка та локальна перевірка API
 
-### 3. Build Stage - Docker image assemly
+**Дія:** Створення Docker-образу FastAPI сервісу та його тестування.
 
-**Job: `build`**
+```bash
+# Збірка образу
+docker build -t inference-api:v0.1.0 .
+```
 
-**Deployment steps:**
+![alt text](screens/1.%20docker_build.png)
 
-1. **Environment inicialization:**
-   - Docker-in-Docker (dind) service is startig
-   - AWS CLI is installing
+```bash
+# Локальний запуск та перевірка Health-check
+docker run -p 8080:8080 inference-api:v0.1.0
+```
 
-2. **Authorization in в AWS ECR:**
-   ```bash
-   aws ecr get-login-password --region eu-central-1 | \
-     docker login --username AWS --password-stdin $ECR_REGISTRY
-   ```
-   - Authorisation tokens for ECR receiving 
-   - Docker login starts
+![alt text](screens/2.%20docker_local_check.png)
 
-3. **Docker image assemling:**
-   ```bash
-   docker build -t $IMAGE_TAG .
-   ```
-   - Image created with following teg: `fast-api-service:24ffgh24` (commit SHA)
-   - Dockerfile running:
-     - Basic image: `python:3.11-slim`
-     - `requirements.txt` and `predict.py`copying
-     - Dependencies created (FastAPI, uvicorn)
+![alt text](screens/3.%20docker_inference_check.png)
 
-4. **Tagging and publicing in ECR:**
-   ```bash
-   docker tag $IMAGE_TAG $ECR_REGISTRY/$IMAGE_TAG
-   docker push $ECR_REGISTRY/$IMAGE_TAG
-   docker tag $IMAGE_TAG $ECR_REGISTRY/$CI_REGISTRY_IMAGE:latest
-   docker push $ECR_REGISTRY/$CI_REGISTRY_IMAGE:latest
-   ```
-   - The image pushes with two tags:
-     - `451405121207.dkr.ecr.eu-central-1.amazonaws.com/fast-api-service:24ffgh24` (commit SHA)
-     - `451405121207.dkr.ecr.eu-central-1.amazonaws.com/fast-api-service:latest` (latest)
+---
 
-**The result:** Docker image is accessible in AWS ECR
+## Етап 3: Підготовка Helm-чарту
 
-### 4. ArgoCD tracking changes in Git repository 
+**Дія:** Створення Helm-шаблонів для Inference-api, MLflow, Postgres.
 
-**How does ArgoCD work:**
+---
 
-1. **ArgoCD Application tuned:**
-   - It tracks repository: `https://gitlab.com/eadors/mlops-fp.git`
-   - Branch: `main`
-   - Path: `helm/` (Helm chart)
-   - Auto-sync switched on with checking interval (default 3 minutes)
+## Етап 4: Розгортання EKS Кластера
 
-2. **ArgoCD discovers changes:**
-   - ArgoCD tracks Git repository
-   - If there is changes in `helm/`folder or in `argocd/application.yaml`:
-     - ArgoCD finds new commit
-     - It compares current cluster stage with necessary Git stage
+**Дія:** Створення VPC та керованого Kubernetes кластера в AWS.
 
-3. **Auto-sync policy:**
-   - `prune: true` - removes resources which are absence in Git
-   - `selfHeal: true` - if someone change the stage it restore correct stage automaticaly
-   - `allowEmpty: false` - doesn't allow empty sync
+```bash
+cd terraform/eks
+terraform apply -auto-approve
+aws eks update-kubeconfig --region eu-north-1 --name aiops-quality-cluster --profile hannadunska-fp-mlops
+```
 
-### 5. ArgoCD synchronises  changes with EKS cluster
+![alt text](screens/5.%20eks_cluster_apply.png)
 
-**Synchronisation process:**
+![alt text](screens/6.%20kubectl_get_nodes.png)
 
-1. **ArgoCD reads Helm chart:**
-   - Download `helm/Chart.yaml`
-   - Download `helm/values.yaml`
-   - Applies parameters from `argocd/application.yaml`:
-     ```yaml
-     image.repository: 451405121207.dkr.ecr.eu-central-1.amazonaws.com/fast-api-service
-     image.tag: latest
-     ```
+---
 
-2. **Kubernetes manifests generation:**
-   - ArgoCD runs `helm template` with parameters
-   - Generate Kubernetes resources:
-     - Deployment
-     - Service
-     - ServiceAccount
-     - Ingress (if enabled)
-     - HPA (if enabled)
+## Етап 5: Початковий деплой сервісів
 
-3. **Changes apply to cluster:**
-   - ArgoCD use Kubernetes API for changes apply
-   - `kubectl apply` runs for new/updated resources
+**Дія:** Ручний деплой для первинної перевірки чартів та бази даних.
 
-### 6. Kubernetes updates Deployment
+```bash
+# Helm chart deploy
+helm upgrade --install inference-api ./helm/inference-api -n serving
+```
+![alt text](screens/7.%20helm_chart_deploy.png)
 
-**Updates process in EKS:**
+### Postgres як база даних для MLflow
 
-1. **Deployment Controller finds changes:**
-   - Kubernetes finds Deployment new version
-   - Compare current stage with necessary
+![alt text](screens/8.%20postgres_training.png)
 
-2. **Rolling Update:**
-   - Kubernetes creates new Pods with new image
-   - New image: `451405121207.dkr.ecr.eu-central-1.amazonaws.com/fast-api-service:latest`
-   - Old Pods continue work until new ones are ready
+---
 
-3. **Readiness Probe:**
-   - Kubernetes checks `/docs` endpoint
-   - When new Pods are ready (readiness probe successfully):
-     - Trafic switches to the new Pods
-     - Old Pods finish
+## Етап 6: MLflow та Артефакти (Training Plane)
 
-4. **The result:**
-   - Service updated to the new version
-   - Minimal downtime (rolling update)
-   - 2 replics work with the new code
+**Дія:** Налаштування S3 для зберігання моделей та запуск MLflow Tracking Server.
 
-### 7. Status check
+```bash
+# Створення S3 бакета
+aws s3 mb s3://$MLFLOW_BUCKET --region $AWS_REGION --profile $AWS_PROFILE
+```
 
-**Process monitoring:**
+![alt text](screens/9.%20s3_bucket.png)
 
-1. **GitLab CI/CD:**
-   - Build job status check in GitLab UI
-   - Check that the image successfully pushed in ECR
+```bash
+# Mlflow deploy
+helm upgrade --install mlflow ./helm/mlflow -n training
 
-2. **ArgoCD UI:**
-   - Open ArgoCD dashboard
-   - Check status of application `mlops-inference-service`
-   - See synchronization in real time
+# Доступ до MLflow UI
+kubectl -n training port-forward svc/training-mlflow 5000:5000
+```
 
-3. **Kubernetes:**
-   ```bash
-   kubectl get pods -n default
-   kubectl get deployment mlops-inference-service -n default
-   kubectl describe deployment mlops-inference-service -n default
-   ```
+![alt text](screens/9.%20mlflow_training.png)
 
-4. **Service testing:**
-   ```bash
-   kubectl port-forward svc/mlops-inference-service 8000:8000 -n default
-   curl http://localhost:8000/docs
-   curl -X POST http://localhost:8000/predict -H "Content-Type: application/json" -d '{"input": "test"}'
-   ```
+![alt text](screens/12.%20ml_flow_working.png)
 
-## Update scenarios
+---
 
-### Scenario 1: App code update
+## Етап 7: GitOps та ArgoCD
 
-1. `predict.py` or `requirements.txt` changes
-2. Push in GitLab → Build job assemble a new image
-3. The image has been pushed in ECR with tag `latest`
-4. ArgoCD didn't find changes in `helm/`, but image `latest` updated
-5. **It is necessary to update Helm chart** or change `image.tag` in ArgoCD application
+**Дія:** Впровадження GitOps-процесу через ArgoCD для автоматичної синхронізації стану репозиторію з кластером.
 
-**Solution:** Update `argocd/application.yaml` with new tag or use commit SHA
+```bash
+# Створення Namespace та деплой App-of-Apps
+kubectl apply -f app/argocd/app-of-apps.yaml
+```
 
-### Scenario 2: Helm chart update
+![alt text](screens/14.%20prometheus_ui.png)
 
-1. Changes in `helm/values.yaml` configuration (for example, `replicaCount: 3`)
-2. Push в GitLab
-3. ArgoCD finds changes in `helm/` folder
-4. ArgoCD automatically synchronize the changes
-5. Kubernetes extends deployment up to 3 replics
+---
 
-### Scenario 3: Dockerfile update
+## Етап 8: Робота сервісу та Детекція Дрейфу
 
-1. `Dockerfile` is changed
-2. Push в GitLab → Build job assemble a new image
-3. The image is pushed in ECR
-4. ArgoCD use image `latest` and automatically use this image
-5. Kubernetes uses rolling update
+**Дія:** Виконання прогнозів та перевірка механізму виявлення дрейфу даних.
 
-## Important
+```bash
+# Тестування передбачень через Port-forward
+kubectl -n serving port-forward svc/inference-api 8080:80
+```
 
-### Images' security
+**Результати запитів:**
 
-- The image with tag `latest` always indicates to the last assembly
-- The image with commit SHA allows rollback to the necessary version
-- Recommended to use specific tags for production
+- **Drift = False (Нормальні дані)**:
+    
+    ![alt text](screens/20.%20drift_false.png)
+    
+- **Drift = True (Аномальні дані)**:
+    
+    ![alt text](screens/21.%20drift_true.png)
+    
+    
 
-### Automation 
+---
 
-- ArgoCD auto-sync provides automatically update
-- Self-heal restore stage in case of manual changes
-- Prune deletes out of date resources
+## Етап 9: Моніторинг (Prometheus)
 
-### Monitoring
+**Дія:** Збір та візуалізація метрик роботи моделі.
 
-- ArgoCD UI shows stage of synchronization
-- Kubernetes events shows update process
-- GitLab CI/CD shows th image stage
 
-## Deployment time
+![alt text](screens/23.%20prometheus.png)
 
-- **Build job:** 2-5 minutes (depends on the image size)
-- **ArgoCD sync:** 3-5 minutes (check interval + synchronization time)
-- **Kubernetes rolling update:** 1-3 minutes (depends on number of replics)
-- **Total time:** 6-13 minutes from push to total redeploy
+![alt text](screens/23.%20prometheus_latency.png)
+
+![alt text](screens/23.%20prometheus_drift.png)
+
+Були виключені: Loki & Promtail
+![alt text](screens/16.%20too_man_pods.png)
+
+
+---
+
+## Етап 10: Retraining Loop (GitLab CI)
+
+**Дія:** Автоматизація перенавчання моделі та оновлення продуктового середовища.
+
+1. **Тренування та реєстрація моделі:**
+    
+    ![alt text](screens/19.%20model_train_and_promotion.png)
+    
+2. **Запуск GitLab CI Пайплайну:**
+- **Automation (що CI робить автоматично):**
+  - Збирає новий Docker-образ inference-сервісу
+  - Push-ить образ в ECR реєстр
+  - Оновлює тег образу в Helm values.yaml через CI-бот (bump версії)
+  - Робить git commit та push змін у репозиторій
+  - ArgoCD автоматично виявляє зміни та деплоїть нову версію в кластер через automated sync policy
+- **Обмеження (що CI не може зробити):**
+  - Не може запускати тренування моделі в MLflow, допоки MLflow знаходиться в приватній мережі EKS
+  - Тренування моделі виконується вручну/локально через port-forward до MLflow
+
+    ![alt text](screens/25.%20cicd_gitlab.png)
+
+    ![alt text](screens/26.%20argo_cd_proof.png)
+    
+
+---
+
+## Результати
+
+**Технічні результати впровадження**
+
+**1. Inference & API Layer**
+- **Deployment**: FastAPI сервіс розгорнуто в K8s (namespace: serving) з налаштованими Liveness/Readiness probes.
+- **Interface**: Реалізовано REST API з ендпоінтами `/predict`, `/health` та `/metrics`.
+- **Logic**: API успішно обробляє вхідні JSON-тензори та повертає передбачення разом із прапором `drift_detected`, що дозволяє інтегрувати логіку дрейфу безпосередньо у відповідь сервісу.
+- **Connectivity**: Підтверджено коректну маршрутизацію трафіку до подів через Service (ClusterIP) при використанні port-forward.
+
+**2. GitOps & CD (ArgoCD)**
+- **Pattern**: Впроваджено підхід App-of-Apps. ArgoCD автоматично синхронізує стан Helm-чартів із репозиторію в кластер.
+- **Lifecycle**: Будь-яка зміна версії образу (image tag) у Git автоматично ініціює RollingUpdate деплойменту без ручного використання kubectl.
+- **Isolation**: Ресурси логічно розділені на рівні Namespace: `serving` (інференс), `training` (MLflow, Postgres) та `observability` (Prometheus).
+
+**3. Monitoring & Observability**
+- **Metrics**: Реалізовано Prometheus-експортер. Окрім стандартних системних метрик (Python GC, Memory), збираються кастомні бізнес-метрики: затримка (latency) та статус дрейфу.
+- **Alerting Foundation**: Ендпоінт `/metrics` інтегровано в Prometheus targets через pod annotations (`prometheus.io/scrape: "true"`), що дозволяє будувати Dashboard у Grafana та налаштовувати алертінг на аномальні значення дрейфу.
+
+**4. CI/CD Retraining Loop**
+- **Automation**: CI автоматично збирає новий Docker-образ, push-ить в ECR, оновлює Helm-чарт (bump версії) та пушить зміни в Git. ArgoCD автоматично синхронізує нову версію в кластер.
+- **GitOps Integration**: Зміни версії образу в Git автоматично ініціюють RollingUpdate деплойменту без ручного втручання, демонструючи автоматизацію CI/CD → GitOps для deployment частини.
+- **Infrastructure**: Створено стабільний Training Plane (MLflow + Postgres + S3), що забезпечує збереження артефактів та трекінг експериментів поза межами життя окремих подів.
+
+
+
+

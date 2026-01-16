@@ -1,49 +1,89 @@
 stages:
+  - retrain
   - build
+  - bump
 
 variables:
-  AWS_DEFAULT_REGION: "eu-central-1"
-  IMAGE_TAG: $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA
+  IMAGE_TAG: "v${CI_PIPELINE_IID}"
+  ECR_REGISTRY: "879794963746.dkr.ecr.us-east-1.amazonaws.com"
+  ECR_REPOSITORY: "inference-api"
 
-build:
-  stage: build
-  image: docker:latest
-  services:
-    - docker:dind
-  before_script:
-    - apk add --no-cache aws-cli
-    - aws --version
-    - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $ECR_REGISTRY
+retrain-model:
+  stage: retrain
+  image: python:3.11-slim
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "trigger"'
+      when: on_success
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+      when: manual
   script:
-    - docker build -t $IMAGE_TAG .
-    - docker tag $IMAGE_TAG $ECR_REGISTRY/$IMAGE_TAG
-    - docker push $ECR_REGISTRY/$IMAGE_TAG
-    - docker tag $IMAGE_TAG $ECR_REGISTRY/$CI_REGISTRY_IMAGE:latest
-    - docker push $ECR_REGISTRY/$CI_REGISTRY_IMAGE:latest
-  only:
-    - main
-    - master
-    - develop
-  tags:
-    - docker
+    - pip install --no-cache-dir -r model/requirements.txt
+
+    - |
+      if [ -z "${MLFLOW_TRACKING_URI}" ]; then
+        echo "✅ DEMO MODE: MLFLOW_TRACKING_URI не заданий"
+        python -c "print('retrain done (mock)')"
+        exit 0
+      fi
+
+      if echo "${MLFLOW_TRACKING_URI}" | grep -q "localhost"; then
+        echo "✅ DEMO MODE: MLflow недоступний з GitLab SaaS runner"
+        python -c "print('retrain done (mock)')"
+        exit 0
+      fi
+
+      echo "✅ REAL MODE: retrain з MLflow (${MLFLOW_TRACKING_URI})"
+      python model/train.py
 
 
-# ECR_REGISTRY - 451405121207.dkr.ecr.eu-central-1.amazonaws.com
-# CI_REGISTRY_IMAGE - fast-api-service
-# CI_COMMIT_SHORT_SHA - 24ffgh24d24b2242
-#
-# Примітка: Deploy job видалено, оскільки використовується ArgoCD.
-# ArgoCD автоматично синхронізує зміни з Git репозиторію (helm/ чарт)
-# і оновлює deployment в кластері. Build job пушить Docker образ в ECR,
-# а ArgoCD відстежує зміни в helm/ і автоматично застосовує їх до кластера.
-#
-# AWS IAM Policy для доступу до ECR (див. ecr-policy.json):
-# - GetAuthorizationToken - для отримання токену авторизації
-# - PutImage, BatchCheckLayerAvailability, InitiateLayerUpload, UploadLayerPart, CompleteLayerUpload - для завантаження образів
-# - DescribeRepositories, DescribeImages - для перевірки наявності репозиторію
-# Policy обмежена тільки репозиторієм: arn:aws:ecr:eu-central-1:451405121207:repository/fast-api-service
-#
-# AWS IAM Policy для доступу до EKS:
-# - eks:DescribeCluster - для отримання інформації про кластер
-# - eks:ListClusters - для переліку кластерів
-# - eks:AccessKubernetesApi - для доступу до Kubernetes API
+build-inference-image:
+  stage: build
+  image:
+    name: gcr.io/kaniko-project/executor:debug
+    entrypoint: [""]
+  needs: ["retrain-model"]
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "trigger"'
+      when: on_success
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+      when: manual
+  script:
+    - mkdir -p /kaniko/.docker
+    - |
+      cat > /kaniko/.docker/config.json <<EOF
+      {
+        "credHelpers": {
+          "${ECR_REGISTRY}": "ecr-login"
+        }
+      }
+      EOF
+
+    - /kaniko/executor
+      --context "${CI_PROJECT_DIR}"
+      --dockerfile "${CI_PROJECT_DIR}/Dockerfile"
+      --destination "${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}"
+      --destination "${ECR_REGISTRY}/${ECR_REPOSITORY}:latest"
+
+bump-helm-tag-in-github:
+  stage: bump
+  image: alpine:3.20
+  needs: ["build-inference-image"]
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "trigger"'
+      when: on_success
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+      when: manual
+  script:
+    - apk add --no-cache git yq
+    - git config --global user.email "ci-bot@gitlab"
+    - git config --global user.name "ci-bot"
+    - |
+      git clone "https://oauth2:${GITHUB_TOKEN}@github.com/${GITHUB_REPO}.git" repo
+      cd repo
+      git checkout final-project
+
+      yq -i ".image.tag = \"${IMAGE_TAG}\"" helm/inference-api/values.yaml
+
+      git add helm/inference-api/values.yaml
+      git commit -m "chore: bump inference image tag to ${IMAGE_TAG}" || echo "no changes to commit"
+      git push origin final-project
