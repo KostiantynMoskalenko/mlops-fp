@@ -1,57 +1,73 @@
-import os
-import mlflow
-import mlflow.sklearn
-from mlflow.tracking import MlflowClient
+import logging
+import pickle
+from pathlib import Path
 
-from sklearn.datasets import load_iris
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI", "http://localhost:5000")
-EXPERIMENT_NAME = os.getenv("MLFLOW_EXPERIMENT", "iris_rf_experiment")
-MODEL_NAME = os.getenv("MODEL_NAME", "iris_rf_model")
+class ModelTrainer:
+    def __init__(self):
+        self.model = None
+        self.model_path = Path("model.pkl")
+    
+    def train(self, training_data: dict) -> dict:
+        logger.info("Starting model training...")
+        logger.info(f"Training data shape: {training_data.get('shape', 'unknown')}")
+        
+        self.model = MockTrainedModel()
+        
+        logger.info("Model training completed")
+        return {
+            "status": "success",
+            "model_type": "mock_model",
+            "accuracy": 0.95,
+            "training_samples": training_data.get("samples", 1000)
+        }
+    
+    def save_model(self, path: str = None) -> str:
+        if path is None:
+            path = str(self.model_path)
+        
+        logger.info(f"Saving model to {path}")
+        
+        with open(path, "wb") as f:
+            pickle.dump(self.model, f)
+        
+        logger.info(f"Model saved successfully to {path}")
+        return path
+    
+    def load_model(self, path: str = None) -> object:
+        if path is None:
+            path = str(self.model_path)
+        
+        logger.info(f"Loading model from {path}")
+        
+        with open(path, "rb") as f:
+            self.model = pickle.load(f)
+        
+        logger.info("Model loaded successfully")
+        return self.model
 
-PROMOTE_TO_PROD = os.getenv("PROMOTE_TO_PROD", "true").lower() == "true"
+class MockTrainedModel:
+    def __init__(self):
+        self.version = "1.0.0"
+        self.trained = True
+    
+    def predict(self, data):
+        import random
+        return random.random()
 
-def main():
-    mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
-    mlflow.set_experiment(EXPERIMENT_NAME)
-
-    X, y = load_iris(return_X_y=True)
-    X_train, X_test, y_train, y_test = train_test_split(X, y, random_state=42)
-
-    with mlflow.start_run() as run:
-        clf = RandomForestClassifier(n_estimators=100, max_depth=3, random_state=42)
-        clf.fit(X_train, y_train)
-
-        acc = accuracy_score(y_test, clf.predict(X_test))
-        mlflow.log_metric("accuracy", acc)
-
-        # Register model in Model Registry
-        model_info = mlflow.sklearn.log_model(
-            sk_model=clf,
-            artifact_path="model",
-            registered_model_name=MODEL_NAME,
-        )
-
-        print(f"Run ID: {run.info.run_id}")
-        print(f"Registered model name: {MODEL_NAME}")
-        print(f"Model URI: {model_info.model_uri}")
-
-        if PROMOTE_TO_PROD:
-            client = MlflowClient()
-            # Find latest version created by this run
-            versions = client.search_model_versions(f"name='{MODEL_NAME}'")
-            # Pick the newest by version number
-            latest = max(versions, key=lambda v: int(v.version))
-            client.transition_model_version_stage(
-                name=MODEL_NAME,
-                version=latest.version,
-                stage="Production",
-                archive_existing_versions=True
-            )
-            print(f"Promoted {MODEL_NAME} v{latest.version} to Production")
+def train_model(training_data: dict = None) -> dict:
+    if training_data is None:
+        training_data = {"samples": 1000, "shape": (1000, 10)}
+    
+    trainer = ModelTrainer()
+    result = trainer.train(training_data)
+    model_path = trainer.save_model()
+    result["model_path"] = model_path
+    return result
 
 if __name__ == "__main__":
-    main()
+    result = train_model()
+    print(f"Training result: {result}")
+

@@ -1,6 +1,0 @@
-apiVersion: v2
-name: inference-api
-description: FastAPI inference service (MLflow-backed later)
-type: application
-version: 0.1.0
-appVersion: "0.1.0"
