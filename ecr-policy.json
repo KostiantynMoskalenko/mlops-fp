@@ -21,7 +21,7 @@
         "ecr:UploadLayerPart",
         "ecr:CompleteLayerUpload"
       ],
-      "Resource": "arn:aws:ecr:eu-central-1:451405121207:repository/fast-api-service"
+      "Resource": "arn:aws:ecr:us-east-1:879794963746:repository/fast-api-service"
     },
     {
       "Sid": "ECRDescribeRepositories",
@@ -30,7 +30,7 @@
         "ecr:DescribeRepositories",
         "ecr:DescribeImages"
       ],
-      "Resource": "arn:aws:ecr:eu-central-1:451405121207:repository/fast-api-service"
+      "Resource": "arn:aws:ecr:us-east-1:879794963746:repository/fast-api-service"
     }
   ]
 }

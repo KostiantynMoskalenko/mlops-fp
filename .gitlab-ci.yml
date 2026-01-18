@@ -1,8 +1,9 @@
 stages:
   - build
+  - retrain
 
 variables:
-  AWS_DEFAULT_REGION: "eu-central-1"
+  AWS_DEFAULT_REGION: "us-east-1"
   IMAGE_TAG: $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA
 
 build:
@@ -26,6 +27,34 @@ build:
     - develop
   tags:
     - docker
+
+retrain-model:
+  stage: retrain
+  image: python:3.11-slim
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "trigger"'
+      when: on_success
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+      when: manual
+  script:
+    - pip install --no-cache-dir -r model/requirements.txt
+
+    - |
+      if [ -z "${MLFLOW_TRACKING_URI}" ]; then
+        echo "✅ DEMO MODE: MLFLOW_TRACKING_URI не заданий"
+        python -c "print('retrain done (mock)')"
+        exit 0
+      fi
+
+      if echo "${MLFLOW_TRACKING_URI}" | grep -q "localhost"; then
+        echo "✅ DEMO MODE: MLflow недоступний з GitLab SaaS runner"
+        python -c "print('retrain done (mock)')"
+        exit 0
+      fi
+
+      echo "✅ REAL MODE: retrain з MLflow (${MLFLOW_TRACKING_URI})"
+      python model/train.py
+
 
 
 # ECR_REGISTRY - 451405121207.dkr.ecr.eu-central-1.amazonaws.com

@@ -1,9 +1,9 @@
 replicaCount: 2
 
 image:
-  repository: ""
-  pullPolicy: IfNotPresent
+  repository: 879794963746.dkr.ecr.us-east-1.amazonaws.com/inference-api
   tag: "latest"
+  pullPolicy: IfNotPresent
 
 imagePullSecrets: []
 

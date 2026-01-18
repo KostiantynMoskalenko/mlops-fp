@@ -1,5 +1,5 @@
 # CI/CD full process: from push to redeploy in EKS
-
+# Preconditions: already deployed ECR, EKS and VPC
 ## Algorithm
 
 ```
@@ -39,7 +39,7 @@ git push origin main
 
 2. **Authorization in в AWS ECR:**
    ```bash
-   aws ecr get-login-password --region eu-central-1 | \
+   aws ecr get-login-password --region us-east-1 | \
      docker login --username AWS --password-stdin $ECR_REGISTRY
    ```
    - Authorisation tokens for ECR receiving 
@@ -129,7 +129,7 @@ git push origin main
    - Old Pods continue work until new ones are ready
 
 3. **Readiness Probe:**
-   - Kubernetes checks `/docs` endpoint
+   - Kubernetes checks `/health` endpoint
    - When new Pods are ready (readiness probe successfully):
      - Trafic switches to the new Pods
      - Old Pods finish
@@ -162,7 +162,7 @@ git push origin main
 4. **Service testing:**
    ```bash
    kubectl port-forward svc/mlops-inference-service 8000:8000 -n default
-   curl http://localhost:8000/docs
+   curl http://localhost:8000/health
    curl -X POST http://localhost:8000/predict -H "Content-Type: application/json" -d '{"input": "test"}'
    ```
 

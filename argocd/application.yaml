@@ -16,7 +16,7 @@ spec:
         - values.yaml
       parameters:
         - name: image.repository
-          value: 451405121207.dkr.ecr.eu-central-1.amazonaws.com/fast-api-service
+          value: 879794963746.dkr.ecr.us-east-1.amazonaws.com/fast-api-service
         - name: image.tag
           value: latest
   destination:
